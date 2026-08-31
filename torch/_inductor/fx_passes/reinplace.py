@@ -272,28 +272,26 @@ def _scatter_copied_back_through_indexed_updates(
         for user in node.users
         if user.target in _SCATTER_COPY_BACK_THROUGH_OPS and user.args[0] is node
     ]
-    reachable: OrderedSet[torch.fx.Node] = OrderedSet([node])
-    copy_backs: OrderedSet[torch.fx.Node] = OrderedSet()
+    indexed_updates: OrderedSet[torch.fx.Node] = OrderedSet()
     while pending:
         current = pending.pop()
-        if current in reachable:
+        if current in indexed_updates:
             continue
-        reachable.add(current)
-        for user in current.users:
-            if (
-                user.target is aten.copy_.default
-                and user.args[0] is inp
-                and user.args[1] is current
-            ):
-                copy_backs.add(user)
+        indexed_updates.add(current)
         pending.extend(
             user
             for user in current.users
             if user.target in _SCATTER_COPY_BACK_THROUGH_OPS and user.args[0] is current
         )
+
+    aliases = (node, *indexed_updates)
     return any(
-        not _has_data_use_of_aliases_after_node(tuple(reachable), copy_back)
-        for copy_back in copy_backs
+        user.target is aten.copy_.default
+        and user.args[0] is inp
+        and user.args[1] is current
+        and not _has_data_use_of_aliases_after_node(aliases, user)
+        for current in indexed_updates
+        for user in current.users
     )
 
 

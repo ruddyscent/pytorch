@@ -571,8 +571,8 @@ class TestReinplacingPassCorrectness(InductorTestCase):
 
         def build_graph(
             *,
-            values_from_scatter: bool,
-            copy_dst_is_inp: bool,
+            values_from_scatter: bool = False,
+            copy_dst_is_inp: bool = True,
             num_updates: int = 1,
             post_copy_use: str | None = None,
         ):
@@ -611,7 +611,9 @@ class TestReinplacingPassCorrectness(InductorTestCase):
                 live_result = g.call_function(operator.getitem, (split, 0))
             copy_dst = inp if copy_dst_is_inp else other
             g.call_function(aten.copy_.default, (copy_dst, put))
-            if post_copy_use == "metadata":
+            if post_copy_use == "post_copy_indexed_update":
+                g.call_function(put_op, (scatter, [indices], values, False))
+            elif post_copy_use == "metadata":
                 g.call_function(aten.sym_size.int, (scatter, 0))
             elif post_copy_use == "ordering":
                 g.call_function(control_deps, ((scatter,), subgraph, other))
@@ -622,99 +624,32 @@ class TestReinplacingPassCorrectness(InductorTestCase):
                 "intermediate_view_output",
                 "sibling_output",
                 "indexed_split_output",
+                "post_copy_indexed_update",
             ):
                 raise AssertionError(f"unexpected post_copy_use: {post_copy_use}")
             g.output(live_result if live_result is not None else copy_dst)
             return scatter
 
-        self.assertTrue(
-            should_reinplace_scatter(
-                build_graph(values_from_scatter=False, copy_dst_is_inp=True)
-            )
+        cases = (
+            ({}, True),
+            ({"values_from_scatter": True}, True),
+            ({"num_updates": 2}, True),
+            ({"copy_dst_is_inp": False}, False),
+            ({"post_copy_use": "view_output"}, False),
+            ({"post_copy_use": "sibling_output"}, False),
+            ({"post_copy_use": "indexed_split_output"}, False),
+            ({"post_copy_use": "indexed_output"}, False),
+            ({"num_updates": 2, "post_copy_use": "intermediate_view_output"}, False),
+            ({"post_copy_use": "post_copy_indexed_update"}, False),
+            ({"post_copy_use": "metadata"}, True),
+            ({"post_copy_use": "ordering"}, True),
         )
-        self.assertTrue(
-            should_reinplace_scatter(
-                build_graph(values_from_scatter=True, copy_dst_is_inp=True)
+        for kwargs, expected in cases:
+            self.assertEqual(
+                should_reinplace_scatter(build_graph(**kwargs)),
+                expected,
+                f"{put_op}: {kwargs}",
             )
-        )
-        self.assertTrue(
-            should_reinplace_scatter(
-                build_graph(
-                    values_from_scatter=False,
-                    copy_dst_is_inp=True,
-                    num_updates=2,
-                )
-            )
-        )
-        self.assertFalse(
-            should_reinplace_scatter(
-                build_graph(values_from_scatter=False, copy_dst_is_inp=False)
-            )
-        )
-        self.assertFalse(
-            should_reinplace_scatter(
-                build_graph(
-                    values_from_scatter=False,
-                    copy_dst_is_inp=True,
-                    post_copy_use="view_output",
-                )
-            )
-        )
-        self.assertFalse(
-            should_reinplace_scatter(
-                build_graph(
-                    values_from_scatter=False,
-                    copy_dst_is_inp=True,
-                    post_copy_use="sibling_output",
-                )
-            )
-        )
-        self.assertFalse(
-            should_reinplace_scatter(
-                build_graph(
-                    values_from_scatter=False,
-                    copy_dst_is_inp=True,
-                    post_copy_use="indexed_split_output",
-                )
-            )
-        )
-        self.assertFalse(
-            should_reinplace_scatter(
-                build_graph(
-                    values_from_scatter=False,
-                    copy_dst_is_inp=True,
-                    post_copy_use="indexed_output",
-                )
-            )
-        )
-        self.assertFalse(
-            should_reinplace_scatter(
-                build_graph(
-                    values_from_scatter=False,
-                    copy_dst_is_inp=True,
-                    num_updates=2,
-                    post_copy_use="intermediate_view_output",
-                )
-            )
-        )
-        self.assertTrue(
-            should_reinplace_scatter(
-                build_graph(
-                    values_from_scatter=False,
-                    copy_dst_is_inp=True,
-                    post_copy_use="metadata",
-                )
-            )
-        )
-        self.assertTrue(
-            should_reinplace_scatter(
-                build_graph(
-                    values_from_scatter=False,
-                    copy_dst_is_inp=True,
-                    post_copy_use="ordering",
-                )
-            )
-        )
 
     @parametrize(
         "factory_op",
