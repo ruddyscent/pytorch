@@ -554,30 +554,53 @@ class TestReinplacingPassCorrectness(InductorTestCase):
         self.assertEqual(post_grad_graphs.count("aten.clone"), 0)
         self.assertNotIn("aten.slice_scatter.default", post_grad_graphs)
 
-    def test_should_reinplace_scatter_indexed_update_chain(self):
+    @parametrize(
+        "put_op",
+        [
+            subtest(aten.index_put.default, name="index_put"),
+            subtest(aten._unsafe_index_put.default, name="unsafe_index_put"),
+        ],
+    )
+    def test_should_reinplace_scatter_indexed_update_chain(self, put_op):
+        from torch._inductor.fx_passes.control_dependencies import control_deps
         from torch._inductor.fx_passes.reinplace import (
             _generalized_scatter,
             should_reinplace_scatter,
             ViewOp,
         )
 
-        def build_graph(*, values_from_scatter: bool, copy_dst_is_inp: bool):
+        def build_graph(
+            *,
+            values_from_scatter: bool,
+            copy_dst_is_inp: bool,
+            post_copy_use: str | None = None,
+        ):
             g = torch.fx.Graph()
             inp = g.placeholder("inp")
             other = g.placeholder("other")
             src = g.placeholder("src")
             indices = g.placeholder("indices")
             values = g.placeholder("values")
+            subgraph = g.placeholder("subgraph")
             view_ops = [ViewOp(target=aten.slice.Tensor, args=(0, 1, -1), kwargs={})]
             scatter = g.call_function(_generalized_scatter, (inp, src, view_ops))
+            late_use_arg = (
+                g.call_function(aten.slice.Tensor, (scatter, 0, 0, None))
+                if post_copy_use == "view_output"
+                else scatter
+            )
             if values_from_scatter:
                 values = g.call_function(aten.index.Tensor, (scatter, [indices]))
-            put = g.call_function(
-                aten.index_put.default, (scatter, [indices], values, False)
-            )
+            put = g.call_function(put_op, (scatter, [indices], values, False))
             copy_dst = inp if copy_dst_is_inp else other
             g.call_function(aten.copy_.default, (copy_dst, put))
-            g.output(copy_dst)
+            if post_copy_use == "metadata":
+                g.call_function(aten.sym_size.int, (scatter, 0))
+            elif post_copy_use == "ordering":
+                g.call_function(control_deps, ((scatter,), subgraph, other))
+            elif post_copy_use not in (None, "view_output"):
+                raise AssertionError(f"unexpected post_copy_use: {post_copy_use}")
+            g.output(late_use_arg if post_copy_use == "view_output" else copy_dst)
             return scatter
 
         self.assertTrue(
@@ -593,6 +616,33 @@ class TestReinplacingPassCorrectness(InductorTestCase):
         self.assertFalse(
             should_reinplace_scatter(
                 build_graph(values_from_scatter=False, copy_dst_is_inp=False)
+            )
+        )
+        self.assertFalse(
+            should_reinplace_scatter(
+                build_graph(
+                    values_from_scatter=False,
+                    copy_dst_is_inp=True,
+                    post_copy_use="view_output",
+                )
+            )
+        )
+        self.assertTrue(
+            should_reinplace_scatter(
+                build_graph(
+                    values_from_scatter=False,
+                    copy_dst_is_inp=True,
+                    post_copy_use="metadata",
+                )
+            )
+        )
+        self.assertTrue(
+            should_reinplace_scatter(
+                build_graph(
+                    values_from_scatter=False,
+                    copy_dst_is_inp=True,
+                    post_copy_use="ordering",
+                )
             )
         )
 

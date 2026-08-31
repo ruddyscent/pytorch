@@ -156,6 +156,32 @@ class LstmModule(torch.nn.Module):
 class CPUReproTests(TestCase):
     common = check_model
 
+    def test_generalized_scatter_copy_back_preserves_live_view(self):
+        def composed(field, src, indices, values):
+            scatter = aten.slice_scatter.default(field, src, 0, 1, -1)
+            view = aten.slice.Tensor(scatter, 0, 0, 2)
+            updated = aten.index_put.default(scatter, [indices], values)
+            aten.copy_.default(field, updated)
+            return view
+
+        field = torch.arange(6, dtype=torch.float32)
+        src = torch.tensor([-1.0, -2.0, -3.0, -4.0])
+        indices = torch.tensor([0], dtype=torch.int64)
+        values = torch.tensor([99.0])
+
+        expected_field = field.clone()
+        expected = composed(expected_field, src, indices, values)
+
+        compiled = torch.compile(composed, fullgraph=True, backend="inductor")
+        with fresh_cache():
+            actual_field = field.clone()
+            actual = compiled(actual_field, src, indices, values)
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual_field, expected_field)
+        self.assertFalse(torch._C._is_alias_of(expected, expected_field))
+        self.assertFalse(torch._C._is_alias_of(actual, actual_field))
+
     def test_generalized_scatter_data_dependent_index_copy(self):
         def composed(field, delta, indices, gain):
             field[1:-1].add_(delta)
